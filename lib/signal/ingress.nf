@@ -195,7 +195,7 @@ process bonito {
 
 process parabricks_minimap {
     label "wf_parabricks"
-    label "parabricks-gpu"
+    label "parabricks_gpu"
     // From parabricks requirement, we need 2 GPU with atleast 100GB CPU RAM and atleast 24 CPU threads
     accelerator 2
     cpus 30
