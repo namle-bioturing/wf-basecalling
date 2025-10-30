@@ -238,6 +238,20 @@ process output_last {
     """
 }
 
+// Output the final stats file
+process output_stats {
+    // publish inputs to output directory
+    label "wf_basecalling"
+    publishDir "${params.out_dir}", mode: 'copy', pattern: "*"
+    input:
+        path fname
+    output:
+        path fname
+    """
+    echo "Writing output files."
+    """
+}
+
 // CW-2569: Emit pod5s if requested, in a new directory
 process output_pod5s {
     // publish inputs to output directory
@@ -388,6 +402,9 @@ workflow {
     }
     // Make the report
     report = makeReport(stats, pairings, software_versions, workflow_params) | last | collect | output_last
+
+    // Publish the final accumulated stats file
+    final_stats = stats | last | collect | output_stats
 
     // Create IGV if the reference genome is passed
     if (params.ref && params.igv && params.output_fmt!='fastq'){
