@@ -93,6 +93,71 @@ process dorado {
     """
 }
 
+process dorado_parabricks {
+    label "wf_dorado"
+    label "wf_basecalling"
+    label "gpu"
+    // Targetting g5.2xlarge (8 CPU, 32 GB, 1 A10G) and g5.12xlarge (64 CPU, 192 GB, 4 A10G)
+    accelerator 1 // further configuration should be overloaded using withLabel:gpu
+    cpus { 8 + params.ubam_bam2fq_threads }
+    memory "29.3GB"
+    input:
+        tuple val(chunk_idx), path('*')
+        tuple val(basecaller_cfg), path("dorado_model"), val(basecaller_model_override)
+        tuple val(remora_cfg), path("remora_model"), val(remora_model_override)
+        path poly_a_config
+    output:
+        path(rbam), emit: rbams
+        path(ubam), emit: ubams
+        path("converted/*.pod5"), emit: converted_pod5s, optional: true
+    script:
+    def remora_model = remora_model_override ? "remora_model" : "\${DRD_MODELS_PATH}/${remora_cfg}"
+    def remora_args = (params.basecaller_basemod_threads > 0 && (params.remora_cfg || remora_model_override)) ? "--modified-bases-models ${remora_model}" : ''
+    def model_arg = basecaller_model_override ? "dorado_model" : "\${DRD_MODELS_PATH}/${basecaller_cfg}"
+    def basecaller_args = params.basecaller_args ?: ''
+    def poly_a_args = poly_a_config.fileName.name == "OPTIONAL_FILE" ? "" : "--estimate-poly-a --poly-a-config ${poly_a_config}"
+    def caller = params.duplex ? "duplex" : "basecaller"
+    def barcode_kit_args = params.barcode_kit ? "--kit-name ${params.barcode_kit}": ''
+    def demux_args = params.demux_args ?: ''
+    // CW-2569: delete pod5 is not required them to be emitted
+    def signal_path = (params.duplex && params.dorado_ext == 'fast5') ? "converted/" : "."
+    def delete_pod5s = !params.output_pod5 ? "rm -r converted/" : "echo 'No cleanup'"
+    // we can't set maxForks dynamically, but we can detect it might be wrong!
+    if (task.executor != "local" && task.maxForks == 1) {
+        log.warn "Non-local workflow execution detected but GPU tasks are currently configured to run in serial, perhaps you should be using '-profile discrete_gpus' to parallelise GPU tasks for better performance?"
+    }
+    String reset_cmd_body = "samtools reset -x tp,cm,s1,s2,NM,MD,AS,SA,ms,nn,ts,cg,cs,dv,de,rl"
+
+    ubam = "${chunk_idx}.ubam"
+    rbam = "${chunk_idx}.bam"
+
+    // If no pairs list, run vanilla duplex
+    """
+    # convert fast5s
+    if [[ "${params.dorado_ext}" == "fast5" ]]; then
+        pod5 convert fast5 ./*.fast5 --output ${signal_path} --threads ${task.cpus} --one-to-one ./
+    fi
+
+    # Run dorado on the new pod5s
+    dorado ${caller} \
+        ${model_arg} \
+        ${signal_path} \
+        ${remora_args} \
+        ${basecaller_args} \
+        ${poly_a_args} \
+        ${barcode_kit_args} \
+        ${demux_args} \
+        --device ${params.cuda_device} \
+        | tee >(samtools view --no-PG -b -o ${ubam} -) \
+        | ${reset_cmd_body} -O BAM -o ${rbam}
+
+    # CW-2569: delete the pod5s, if emit not required.
+    if [[ "${params.duplex}" == "true" && "${params.dorado_ext}" == "fast5" ]]; then
+        ${delete_pod5s}
+    fi
+    """
+}
+
 
 process bonito {
     label "wf_bonito"
@@ -125,6 +190,55 @@ process bonito {
         ${signal_path} \
         ${basecaller_args} \
     | samtools view --no-PG -b -o ${chunk_idx}.ubam -
+    """
+}
+
+process parabricks_minimap {
+    label "wf_parabricks"
+    label "gpu"
+    // From parabricks requirement, we need 2 GPU with atleast 100GB CPU RAM and atleast 24 CPU threads
+    accelerator 2
+    cpus 30
+    memory "120GB"
+    input:
+        path mmi_reference
+        path reference
+        path reads
+        val qscore_filter
+    output:
+        // NOTE merge does not need an index if merging with region/BED (https://github.com/samtools/samtools/blob/969d44990df7fa9c7bda3a7140a2c1d1bd8c62a0/bam_sort.c#L1256-L1272)
+        // so we can save a few cycles and just output the CRAM
+        path(pass_cram), emit: pass
+        path(fail_cram), emit: fail
+    script:
+    // get reads basename
+    def basename = reads.baseName
+    // parabricks minimap doesn't preserve qs tag -- just convert to cram
+    def minimap2_out_bam = "${basename}.minimap2.bam"
+    // output
+    pass_cram = "${basename}.pass.cram"
+    fail_cram = "${basename}.fail.cram"
+    """
+    # Get reads header
+    samtools view -H --no-PG ${reads} > reads.header
+    # Run minimap2
+    pbrun minimap2 \
+        --ref ${reference} \
+        --index ${mmi_reference} \
+        --in-bam ${reads} \
+        --gpusort \
+        --gpuwrite \
+        --x3 \
+        --preset map-ont \
+        --num-gpus 2 \
+        --out-bam ${minimap2_out_bam}
+    # Reheader
+    samtools view -@ ${task.cpus} ${minimap2_out_bam} \
+        | workflow-glue reheader_samstream reads.header \
+        | samtools view \
+              --output ${pass_cram} \
+              --unoutput ${fail_cram} \
+              -O CRAM --reference ${reference} -
     """
 }
 
@@ -389,7 +503,15 @@ workflow wf_dorado {
                 .set{ready_pod5_chunks}
         }
 
-        if (params.use_bonito) {
+        if (params.use_parabricks) {
+            called_bams = dorado_parabricks(
+                ready_pod5_chunks,
+                tuple(margs.basecaller_model_name, basecaller_model, basecaller_model_override),
+                tuple(margs.remora_model_name, remora_model, remora_model_override),
+                margs.poly_a_config
+            )
+        }
+        else if (params.use_bonito) {
             called_bams = bonito(
                 ready_pod5_chunks,
                 tuple(margs.basecaller_model_name, basecaller_model, basecaller_model_override), 
@@ -412,7 +534,11 @@ workflow wf_dorado {
         }
 
         // Run filtering or mapping
-        if (margs.run_alignment) {
+        if (params.use_parabricks) {
+            // align, sort using parabricks minimap, qscore filter
+            crams = parabricks_minimap(margs.input_mmi, margs.input_ref, called_bams.rbams, margs.qscore_filter)
+        } 
+        else if (margs.run_alignment) {
             // align, qscore_filter and sort
             crams = align_and_qsFilter(margs.input_mmi, margs.input_ref, called_bams.ubams, margs.qscore_filter)
         }

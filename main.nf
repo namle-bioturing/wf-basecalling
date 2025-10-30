@@ -303,6 +303,11 @@ workflow {
         }
     }
 
+    if (params.use_parabricks) {
+        log.warn("Using parabricks for minimap, this option will disable use_bonito.")
+        params.use_bonito = false
+    }
+
     // Prepare the reference genome
     Boolean run_alignment = false
     if (params.ref) {
