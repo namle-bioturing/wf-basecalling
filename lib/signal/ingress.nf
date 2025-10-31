@@ -226,7 +226,6 @@ process parabricks_minimap {
         --ref ${reference} \
         --index ${mmi_reference} \
         --in-bam ${reads} \
-        #--gpusort \
         --gpuwrite \
         --x3 \
         --preset map-ont \
