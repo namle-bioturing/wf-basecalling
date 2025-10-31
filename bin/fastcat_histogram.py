@@ -36,19 +36,37 @@ def get_stats(seq_summary):
         qual_bins, qual_counts = histogram_counts(
             qual_data, dmin=0, bin_width=0.2)
         stats_json["qual"] = dict(list(zip(qual_bins, qual_counts)))
+
+        # Add accuracy histogram (convert to percentage, 1% bins)
+        if 'acc' in seq_summary.columns:
+            acc_data = seq_summary['acc'] * 100  # Convert 0.98 -> 98%
+            acc_bins, acc_counts = histogram_counts(
+                acc_data, dmin=0, bin_width=1.0)
+            stats_json["acc"] = dict(list(zip(acc_bins, acc_counts)))
+        else:
+            stats_json["acc"] = dict()
     else:
         sys.stderr.write("WARNING: summary file was empty.\n")
         stats_json["len"] = dict()
         stats_json["qual"] = dict()
+        stats_json["acc"] = dict()
     return stats_json
 
 
 def main(args):
     """Run the entry point."""
-    df = pd.read_csv(
-        args.input, sep="\t",
-        usecols=['read_length', 'mean_quality'],
-        dtype={'read_length': int, 'mean_quality': float})
+    # Read accuracy column if available (only present in aligned BAM)
+    try:
+        df = pd.read_csv(
+            args.input, sep="\t",
+            usecols=['read_length', 'mean_quality', 'acc'],
+            dtype={'read_length': int, 'mean_quality': float, 'acc': float})
+    except ValueError:
+        # If 'acc' column doesn't exist (unaligned BAM), read without it
+        df = pd.read_csv(
+            args.input, sep="\t",
+            usecols=['read_length', 'mean_quality'],
+            dtype={'read_length': int, 'mean_quality': float})
     final = {args.sample_id: get_stats(df)}
     with open(args.output, 'w') as fp:
         json.dump(final, fp)
