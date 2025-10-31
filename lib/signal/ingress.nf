@@ -226,10 +226,12 @@ process parabricks_minimap {
         --ref ${reference} \
         --index ${mmi_reference} \
         --in-bam ${reads} \
-        --gpusort \
+        #--gpusort \
         --gpuwrite \
         --x3 \
         --preset map-ont \
+        --max-queue-reads 25000 \
+        --chunk-size 4000 \
         --num-gpus 2 \
         --out-bam ${minimap2_out_bam}
     # Reheader
