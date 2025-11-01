@@ -11,6 +11,10 @@ import pandas as pd
 
 def histogram_counts(data, dmin=0, bin_width=100):
     """Histogram bins and counts."""
+    # Handle empty data gracefully
+    if len(data) == 0:
+        return [], []
+
     bins = np.arange(dmin, max(data) + bin_width, bin_width)
     counts, _ = np.histogram(data, bins=bins)
     # Note that there can be small differences with/without batch_size=1.
