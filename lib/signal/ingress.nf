@@ -93,7 +93,7 @@ process dorado {
     """
 }
 
-process dorado_parabricks {
+process dorado_and_qsFilter {
     label "wf_dorado"
     label "wf_basecalling"
     label "gpu"
@@ -106,11 +106,14 @@ process dorado_parabricks {
         tuple val(basecaller_cfg), path("dorado_model"), val(basecaller_model_override)
         tuple val(remora_cfg), path("remora_model"), val(remora_model_override)
         path poly_a_config
+        val qscore_filter
     output:
-        path(rbam), emit: rbams
-        path(ubam), emit: ubams
+        path(pbam), emit: pbams  // pass reads only (qs >= qscore_filter)
+        path(ubam), emit: ubams  // all reads (unfiltered)
         path("converted/*.pod5"), emit: converted_pod5s, optional: true
     script:
+    // NOTE: Quality filtering is done here BEFORE alignment (parabricks path only)
+    // This saves time by avoiding alignment of low-quality reads
     def remora_model = remora_model_override ? "remora_model" : "\${DRD_MODELS_PATH}/${remora_cfg}"
     def remora_args = (params.basecaller_basemod_threads > 0 && (params.remora_cfg || remora_model_override)) ? "--modified-bases-models ${remora_model}" : ''
     def model_arg = basecaller_model_override ? "dorado_model" : "\${DRD_MODELS_PATH}/${basecaller_cfg}"
@@ -127,9 +130,10 @@ process dorado_parabricks {
         log.warn "Non-local workflow execution detected but GPU tasks are currently configured to run in serial, perhaps you should be using '-profile discrete_gpus' to parallelise GPU tasks for better performance?"
     }
     String reset_cmd_body = "samtools reset -x tp,cm,s1,s2,NM,MD,AS,SA,ms,nn,ts,cg,cs,dv,de,rl"
+    def filter = "-e '[qs] >= ${qscore_filter}'"
 
     ubam = "${chunk_idx}.ubam"
-    rbam = "${chunk_idx}.bam"
+    pbam = "${chunk_idx}.pass.bam"
 
     // If no pairs list, run vanilla duplex
     """
@@ -149,7 +153,10 @@ process dorado_parabricks {
         ${demux_args} \
         --device ${params.cuda_device} \
         | tee >(samtools view --no-PG -b -o ${ubam} -) \
-        | ${reset_cmd_body} -O BAM -o ${rbam}
+        | ${reset_cmd_body} -o - \
+        | samtools view ${filter} \
+              --output ${pbam} \
+              -O BAM -
 
     # CW-2569: delete the pod5s, if emit not required.
     if [[ "${params.duplex}" == "true" && "${params.dorado_ext}" == "fast5" ]]; then
@@ -213,15 +220,13 @@ process parabricks_minimap {
     script:
     // get reads basename
     def basename = reads.baseName
-    // parabricks minimap doesn't preserve qs tag -- just convert to cram
-    def minimap2_out_bam = "${basename}.minimap2.bam"
-    // output
+    // NOTE: Quality filtering is done in dorado_and_qsFilter before alignment
+    // Input reads are already filtered to pass reads only (qs >= qscore_filter)
+    // We create an empty fail CRAM to maintain workflow compatibility
     pass_cram = "${basename}.pass.cram"
     fail_cram = "${basename}.fail.cram"
     """
-    # Get reads header
-    samtools view -H --no-PG ${reads} > reads.header
-    # Run minimap2
+    # Run minimap2 - input is already filtered to pass reads only
     pbrun minimap2 \
         --ref ${reference} \
         --index ${mmi_reference} \
@@ -232,14 +237,10 @@ process parabricks_minimap {
         --max-queue-reads 25000 \
         --chunk-size 4000 \
         --num-gpus 2 \
-        --out-bam ${minimap2_out_bam}
-    # Reheader
-    samtools view -@ ${task.cpus} ${minimap2_out_bam} \
-        | workflow-glue reheader_samstream reads.header \
-        | samtools view \
-              --output ${pass_cram} \
-              --unoutput ${fail_cram} \
-              -O CRAM --reference ${reference} -
+        --out-bam ${pass_cram}
+
+    # Create empty fail CRAM (no reads filtered at this stage since filtering done earlier)
+    samtools view -H --no-PG ${reads} | samtools view -O CRAM --reference ${reference} -o ${fail_cram} -
     """
 }
 
@@ -505,11 +506,12 @@ workflow wf_dorado {
         }
 
         if (params.use_parabricks) {
-            called_bams = dorado_parabricks(
+            called_bams = dorado_and_qsFilter(
                 ready_pod5_chunks,
                 tuple(margs.basecaller_model_name, basecaller_model, basecaller_model_override),
                 tuple(margs.remora_model_name, remora_model, remora_model_override),
-                margs.poly_a_config
+                margs.poly_a_config,
+                margs.qscore_filter
             )
         }
         else if (params.use_bonito) {
@@ -536,14 +538,18 @@ workflow wf_dorado {
 
         // Run filtering or mapping
         if (params.use_parabricks) {
-            // align, sort using parabricks minimap, qscore filter
-            crams = parabricks_minimap(margs.input_mmi, margs.input_ref, called_bams.rbams, margs.qscore_filter)
-        } 
+            // Parabricks path: quality filtering done in dorado_parabricks before alignment
+            // called_bams.pbams contains only pass reads (qs >= qscore_filter)
+            // parabricks_minimap aligns these pass reads and creates empty fail CRAMs
+            crams = parabricks_minimap(margs.input_mmi, margs.input_ref, called_bams.pbams, margs.qscore_filter)
+        }
         else if (margs.run_alignment) {
+            // Standard path: quality filtering done after alignment
             // align, qscore_filter and sort
             crams = align_and_qsFilter(margs.input_mmi, margs.input_ref, called_bams.ubams, margs.qscore_filter)
         }
         else {
+            // No alignment path: quality filtering only
             // skip alignment and just collate pass and fail
             crams = qsFilter(called_bams.ubams, margs.qscore_filter)
         }
