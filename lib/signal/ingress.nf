@@ -234,7 +234,7 @@ process parabricks_minimap {
         --index ${mmi_reference} \
         --in-bam ${reads} \
         --gpuwrite \
-        --read‑group‑sm SAMPLE \
+        --read-group-sm SAMPLE \
         --x3 \
         --preset map-ont \
         --max-queue-reads 25000 \
