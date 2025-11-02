@@ -210,7 +210,7 @@ process parabricks_minimap {
     input:
         path mmi_reference
         path reference
-        path reads
+        path reads  // filtered pass reads
         val qscore_filter
     output:
         // NOTE merge does not need an index if merging with region/BED (https://github.com/samtools/samtools/blob/969d44990df7fa9c7bda3a7140a2c1d1bd8c62a0/bam_sort.c#L1256-L1272)
@@ -222,7 +222,8 @@ process parabricks_minimap {
     def basename = reads.baseName
     // NOTE: Quality filtering is done in dorado_and_qsFilter before alignment
     // Input reads are already filtered to pass reads only (qs >= qscore_filter)
-    // We create an empty fail CRAM to maintain workflow compatibility
+    // Parabricks minimap2 removes the qs tag, but it's only used for QC/reporting (not variant calling)
+    // bamstats will automatically recalculate mean quality from QUAL field when qs tag is missing
     pass_cram = "${basename}.pass.cram"
     fail_cram = "${basename}.fail.cram"
     """
@@ -235,12 +236,18 @@ process parabricks_minimap {
         --x3 \
         --preset map-ont \
         --max-queue-reads 25000 \
-        --chunk-size 4000 \
+        --chunk-size 2000 \
         --num-gpus 2 \
         --out-bam ${pass_cram}
 
     # Create empty fail CRAM (no reads filtered at this stage since filtering done earlier)
     samtools view -H --no-PG ${reads} | samtools view -O CRAM --reference ${reference} -o ${fail_cram} -
+
+    # NOTE: qs tag is NOT restored because:
+    # - Variant callers (Clair3, DeepVariant) don't use it (they use per-base QUAL)
+    # - bamstats will auto-recalculate from QUAL when missing (slightly slower but accurate)
+    # - Saves ~20 minutes per 10M reads in processing time
+    # - If you need qs tags for custom downstream analysis, use restore_qs_tag.py manually
     """
 }
 
@@ -538,9 +545,10 @@ workflow wf_dorado {
 
         // Run filtering or mapping
         if (params.use_parabricks) {
-            // Parabricks path: quality filtering done in dorado_parabricks before alignment
+            // Parabricks path: quality filtering done in dorado_and_qsFilter before alignment
             // called_bams.pbams contains only pass reads (qs >= qscore_filter)
             // parabricks_minimap aligns these pass reads and creates empty fail CRAMs
+            // Note: qs tags are NOT restored (only needed for QC, not variant calling)
             crams = parabricks_minimap(margs.input_mmi, margs.input_ref, called_bams.pbams, margs.qscore_filter)
         }
         else if (margs.run_alignment) {

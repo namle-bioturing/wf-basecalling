@@ -389,6 +389,9 @@ workflow {
     // Make the report
     report = makeReport(stats, pairings, software_versions, workflow_params) | last | collect | output_last
 
+    // Publish the final accumulated stats file
+    final_stats = stats | last | collect | output_last
+
     // Create IGV if the reference genome is passed
     if (params.ref && params.igv && params.output_fmt!='fastq'){
         // Create temporary channel of FASTA + FAI
