@@ -238,7 +238,7 @@ process parabricks_minimap {
         --x3 \
         --preset map-ont \
         --max-queue-reads 25000 \
-        --chunk-size 4000 \
+        --chunk-size 2000 \
         --num-gpus 2 \
         --out-bam ${pass_cram}
 
