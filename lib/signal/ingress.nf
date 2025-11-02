@@ -204,9 +204,10 @@ process parabricks_minimap {
     label "wf_parabricks"
     label "parabricks_gpu"
     // From parabricks requirement, we need 2 GPU with atleast 100GB CPU RAM and atleast 24 CPU threads
+    // Increased memory to handle write step without OOM kills
     accelerator 2
     cpus 30
-    memory "120GB"
+    memory "150GB"
     input:
         path mmi_reference
         path reference
@@ -236,7 +237,7 @@ process parabricks_minimap {
         --x3 \
         --preset map-ont \
         --max-queue-reads 25000 \
-        --chunk-size 2000 \
+        --chunk-size 4000 \
         --num-gpus 2 \
         --out-bam ${pass_cram}
 
